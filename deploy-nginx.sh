@@ -51,11 +51,11 @@ ask_yes_no() {
 
 require_root
 
-bold "=== Rayoo / 3x-ui nginx deploy script ==="
+bold "=== nginx reverse-proxy deploy script (3x-ui / Xray) ==="
 info "This will build /etc/nginx/sites-available/default from scratch based on your answers."
 echo
 
-DOMAIN="$(ask "Domain name (server_name)" "rayoo.uk")"
+DOMAIN="$(ask "Domain name (server_name)" "example.com")"
 
 echo
 CERT_BASE="/root/cert"
@@ -84,8 +84,8 @@ DEFAULT_PORT="$(ask "Default backend port (httpupgrade inbound)" "10000")"
 
 echo
 bold "--- Extra locations ---"
-info "Add as many reverse-proxy locations as you need (e.g. /kabut for a websocket inbound,"
-info "/rayoo/ for the 3x-ui panel, /user/ for a subscription endpoint, etc.)"
+info "Add as many reverse-proxy locations as you need (e.g. /yourpath for a websocket inbound,"
+info "/panel/ for the 3x-ui panel, /user/ for a subscription endpoint, etc.)"
 info "Enter blank path when done."
 
 declare -a LOC_PATHS=()
@@ -95,7 +95,7 @@ declare -a LOC_BUFOFF=()
 
 while true; do
   echo
-  LOC_PATH="$(ask "Location path (e.g. /kabut or /rayoo/) [blank to finish]" "")"
+  LOC_PATH="$(ask "Location path (e.g. /yourpath or /panel/) [blank to finish]" "")"
   [[ -z "$LOC_PATH" ]] && break
   LOC_PORT="$(ask "  Backend port for $LOC_PATH" "")"
   if [[ -z "$LOC_PORT" ]]; then

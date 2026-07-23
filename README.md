@@ -1,4 +1,4 @@
-# rayoo-nginx-deploy
+# nginx-deploy
 
 Interactive nginx setup for 3x-ui/Xray servers — no more manual config editing on every new box.
 

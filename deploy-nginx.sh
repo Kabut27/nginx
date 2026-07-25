@@ -465,6 +465,30 @@ while true; do
   ok "  Added: $LOC_PATH -> 127.0.0.1:$LOC_PORT"
 done
 
+# ---- collect unique backend ports for upstream keepalive pooling ----
+collect_unique_ports() {
+  local -A seen
+  UNIQUE_PORTS=()
+  local p
+  for p in "${LOC_PORTS[@]}" "$DEFAULT_PORT"; do
+    if [[ -z "${seen[$p]:-}" ]]; then
+      seen[$p]=1
+      UNIQUE_PORTS+=("$p")
+    fi
+  done
+}
+
+render_upstreams() {
+  local p
+  for p in "${UNIQUE_PORTS[@]}"; do
+    echo "upstream backend_${p} {"
+    echo "    server 127.0.0.1:${p};"
+    echo "    keepalive 64;"
+    echo "}"
+    echo
+  done
+}
+
 # ---- render one location block ----
 render_location() {
   local path="$1" port="$2" ws="$3" bufoff="$4"
@@ -479,14 +503,16 @@ render_location() {
       echo "        }"
     fi
     echo "        rewrite ^ / break;"
-    echo "        proxy_pass http://127.0.0.1:${port};"
+    echo "        proxy_pass http://backend_${port};"
   else
-    echo "        proxy_pass http://127.0.0.1:${port}${target};"
+    echo "        proxy_pass http://backend_${port}${target};"
   fi
   echo "        proxy_http_version 1.1;"
   if [[ "$ws" == "1" ]]; then
     echo "        proxy_set_header Upgrade \$http_upgrade;"
     echo "        proxy_set_header Connection \"upgrade\";"
+  else
+    echo "        proxy_set_header Connection \"\";"
   fi
   echo "        proxy_set_header Host \$host;"
   echo "        proxy_set_header X-Real-IP \$remote_addr;"
@@ -496,8 +522,8 @@ render_location() {
     echo "        proxy_buffering off;"
     echo "        proxy_request_buffering off;"
   fi
-  echo "        proxy_read_timeout 300s;"
-  echo "        proxy_send_timeout 300s;"
+  echo "        proxy_read_timeout 3600s;"
+  echo "        proxy_send_timeout 3600s;"
   echo "    }"
 }
 
@@ -531,7 +557,45 @@ ensure_server_tokens_off() {
     fi
   fi
 }
+
+# ---- SSL session reuse + modern protocols, faster reconnects for VLESS clients ----
+ensure_ssl_tuning() {
+  if grep -q "ssl_session_cache" /etc/nginx/nginx.conf 2>/dev/null; then
+    info "SSL session tuning already present in nginx.conf."
+    return
+  fi
+  if grep -q "^http {" /etc/nginx/nginx.conf 2>/dev/null; then
+    sed -i '/^http {/a\    ssl_session_cache shared:SSL:10m;\n    ssl_session_timeout 1h;\n    ssl_session_tickets off;\n    ssl_protocols TLSv1.2 TLSv1.3;\n    ssl_prefer_server_ciphers off;' /etc/nginx/nginx.conf
+    ok "Added SSL session cache + modern protocol tuning to nginx.conf."
+  else
+    err "Could not find 'http {' block in nginx.conf, skipping SSL tuning."
+  fi
+}
+
+# ---- worker/connection tuning for many long-lived VLESS connections ----
+ensure_worker_tuning() {
+  if grep -qE "^worker_processes\s+auto;" /etc/nginx/nginx.conf 2>/dev/null; then
+    info "worker_processes already set to auto."
+  elif grep -qE "^worker_processes" /etc/nginx/nginx.conf 2>/dev/null; then
+    sed -i -E 's/^worker_processes.*/worker_processes auto;/' /etc/nginx/nginx.conf
+    ok "Set worker_processes to auto."
+  else
+    sed -i '1i worker_processes auto;' /etc/nginx/nginx.conf
+    ok "Added worker_processes auto; to top of nginx.conf."
+  fi
+
+  if grep -qE "worker_connections\s+4096;" /etc/nginx/nginx.conf 2>/dev/null; then
+    info "worker_connections already set to 4096."
+  elif grep -q "events {" /etc/nginx/nginx.conf 2>/dev/null; then
+    sed -i -E 's/worker_connections\s+[0-9]+;/worker_connections 4096;/' /etc/nginx/nginx.conf
+    ok "Set worker_connections to 4096 (supports many long-lived VLESS connections)."
+  else
+    err "Could not find 'events {' block in nginx.conf, skipping worker_connections tuning."
+  fi
+}
 ensure_server_tokens_off
+ensure_ssl_tuning
+ensure_worker_tuning
 
 # ---- backup existing config ----
 mkdir -p "$BACKUP_DIR"
@@ -541,7 +605,9 @@ if [[ -f "$NGINX_CONF" ]]; then
 fi
 
 # ---- write config ----
+collect_unique_ports
 {
+  render_upstreams
   echo "server {"
   echo "    listen 80;"
   echo "    listen [::]:80;"
@@ -555,6 +621,7 @@ fi
     echo "server {"
     echo "    listen 443 ssl;"
     echo "    listen [::]:443 ssl;"
+    echo "    http2 on;"
     echo "    server_name ${DOMAIN};"
     echo
     echo "    ssl_certificate     ${CERT_PATH};"
@@ -596,5 +663,8 @@ info "  / -> 127.0.0.1:${DEFAULT_PORT}"
 [[ "$ENABLE_SSL" == "true" ]] && info "HTTPS enabled with cert: $CERT_PATH"
 [[ "$ENABLE_FALLBACK" == "true" ]] && info "Camouflage fallback site served from: $FALLBACK_DIR"
 info "server_tokens off is set — nginx version/OS hidden from response headers."
+info "SSL session cache, TLS 1.2/1.3, and HTTP/2 are enabled for faster reconnects."
+info "worker_processes/worker_connections tuned for many long-lived VLESS connections."
+info "Backends are pooled via upstream keepalive blocks (backend_<port>)."
 info "Reminder: any backend you proxy to a public path (panel, sub endpoint) should"
 info "have its own Listen IP set to 127.0.0.1 so it can't be reached bypassing nginx."
